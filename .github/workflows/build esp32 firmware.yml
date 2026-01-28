@@ -1,0 +1,147 @@
+# ------------------------------------------------------------------
+# 工作流名称：手动触发，为多款 ESP32 板子编译 MicroPython 固件
+# ------------------------------------------------------------------
+name: ESP32 MicroPython Build
+
+# 触发方式：仅手动
+on:
+  workflow_dispatch:
+
+# 并发控制：同一分支只保留最新一次运行
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# 全局环境变量
+env:
+  ESP_IDF_DIR: ${{ github.workspace }}/esp-idf
+  MICROPYTHON_DIR: ${{ github.workspace }}/micropython
+  ARTIFACTS_DIR: ${{ github.workspace }}/artifacts
+  ESP_IDF_VERSION: v5.5.1
+  MPY_VERSION: master
+
+jobs:
+  # ----------------------------------------------------------------
+  # 1) 准备环境：缓存 ESP-IDF 与 MicroPython 源码
+  # ----------------------------------------------------------------
+  setup-environment:
+    runs-on: ubuntu-24.04
+    outputs:
+      cache-hit: ${{ steps.cache.outputs.cache-hit }}
+    steps:
+      # 1.1 检出 MicroPython 主仓库（含子模块）
+      - name: 检出 MicroPython
+        uses: actions/checkout@v4
+        with:
+          repository: micropython/micropython
+          path: micropython
+          submodules: recursive
+
+      # 1.2 缓存 ESP-IDF + MicroPython + pip + 工具链
+      - name: 缓存 ESP-IDF & MicroPython
+        id: cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ env.ESP_IDF_DIR }}
+            ~/.espressif/
+            ~/.cache/pip/
+            ${{ env.MICROPYTHON_DIR }}
+          key: mpy-${{ env.MPY_VERSION }}-idf-${{ env.ESP_IDF_VERSION }}
+          restore-keys: |
+            mpy-${{ env.MPY_VERSION }}-idf-
+            mpy-
+
+      # 1.3 仅当缓存未命中时安装系统依赖
+      - name: 安装系统依赖（未命中缓存时）
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y \
+            git wget flex bison gperf python3 python3-pip python3-venv \
+            cmake ninja-build ccache libffi-dev libssl-dev dfu-util libusb-1.0-0
+
+      # 1.4 仅当缓存未命中时克隆并安装 ESP-IDF
+      - name: 克隆并配置 ESP-IDF（未命中缓存时）
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth=1 --branch=${{ env.ESP_IDF_VERSION }} \
+            https://github.com/espressif/esp-idf.git ${{ env.ESP_IDF_DIR }}
+          cd ${{ env.ESP_IDF_DIR }}
+          git submodule update --init --recursive --filter=tree:0
+          ./install.sh esp32,esp32s3,esp32c3
+          source ./export.sh  # 导入 ESP-IDF 的环境变量
+
+  # ----------------------------------------------------------------
+  # 2) 并行构建多款固件
+  # ----------------------------------------------------------------
+  build:
+    needs: setup-environment
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        # 列出所有要构建的板子/配置
+        include:
+          - board: ESP32_GENERIC_S3
+            variant: SPIRAM_OCT
+            flash_size: 16
+          - board: ESP32_GENERIC_C3
+            variant: ""
+            flash_size: 4
+          - board: ESP32_GENERIC
+            variant: SPIRAM
+            flash_size: 4
+
+    steps:
+      # 2.1 恢复缓存
+      - name: 恢复缓存
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ env.ESP_IDF_DIR }}
+            ~/.espressif/
+            ~/.cache/pip/
+            ${{ env.MICROPYTHON_DIR }}
+          key: mpy-${{ env.MPY_VERSION }}-idf-${{ env.ESP_IDF_VERSION }}
+
+      # 2.2 编译固件（BOARD_VARIANT 为空时留空）
+      - name: 编译固件
+        run: |
+          source ${{ env.ESP_IDF_DIR }}/export.sh
+          
+          cd ${{ env.MICROPYTHON_DIR }}/ports/esp32
+          # BOARD_VARIANT 为空时 make 会自动忽略
+          make BOARD=${{ matrix.board }} \
+               BOARD_VARIANT=${{ matrix.variant }} \
+               FLASH_SIZE=${{ matrix.flash_size }}MB \
+               -j$(nproc)
+
+      # 2.3 生成友好命名的 bin 文件
+      # 命名规则：{board}[_variant]_{flash_size}MB.bin
+      - name: 重命名固件
+        run: |
+          mkdir -p ${{ env.ARTIFACTS_DIR }}
+          
+          # 拼出构建目录名：board 与可选 variant 用 “-” 连接
+          BOARD_NAME="${{ matrix.board }}"
+          [[ -n "${{ matrix.variant }}" ]] && BOARD_NAME+="-${{ matrix.variant }}"
+          # 计算固件真正所在路径
+          FW_PATH="${{ env.MICROPYTHON_DIR }}/ports/esp32/build-${BOARD_NAME}/firmware.bin"  
+        
+          OUT_NAME="${{ matrix.board }}${{ matrix.variant && format('_{0}', matrix.variant) || '' }}_${{ matrix.flash_size }}MB.bin"
+
+          # 如果固件存在则复制并重命名；不存在则报错退出
+          if [[ -f "$FW_PATH" ]]; then          
+            cp "$FW_PATH" "$ARTIFACTS_DIR/$OUT_NAME"
+          else
+            echo "Firmware not found at $FW_PATH"
+            exit 1
+          fi
+
+      # 2.4 上传构建产物
+      - name: 上传固件到 Actions
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.board }}${{ matrix.variant && format('_{0}', matrix.variant) || '' }}-${{ matrix.flash_size }}MB
+          path: ${{ env.ARTIFACTS_DIR }}/*.bin
