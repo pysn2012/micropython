@@ -93,10 +93,10 @@ jobs:
             variant: SPIRAM
             flash_size: 4
           - board: ESP32_GENERIC_P4
-            variant: C6 WiFi/BLE
+            variant: C6_WIFI
             flash_size: 16
           - board: ESP32_GENERIC_P4
-            variant: C5 WiFi/BLE
+            variant: C5_WIFI
             flash_size: 16
           - board: ESP32_GENERIC_C5
             variant: ""
