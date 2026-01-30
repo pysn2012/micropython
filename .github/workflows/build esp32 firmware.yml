@@ -92,6 +92,15 @@ jobs:
           - board: ESP32_GENERIC
             variant: SPIRAM
             flash_size: 4
+          - board: ESP32_GENERIC_P4
+            variant: C6 WiFi/BLE
+            flash_size: 16
+          - board: ESP32_GENERIC_P4
+            variant: C5 WiFi/BLE
+            flash_size: 16
+          - board: ESP32_GENERIC_C5
+            variant: ""
+            flash_size: 4
 
     steps:
       # 2.1 恢复缓存
